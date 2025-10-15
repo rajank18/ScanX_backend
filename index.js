@@ -5,6 +5,15 @@ const compressRoutes = require('./routes/compress');
 const path = require('path');
 
 const app = express();
+const fsSync = require('fs');
+
+// Ensure uploads and processed folders exist
+['uploads', 'processed'].forEach(dir => {
+  if (!fsSync.existsSync(dir)) {
+    fsSync.mkdirSync(dir);
+    console.log(`Created missing folder: ${dir}`);
+  }
+});
 const PORT = process.env.PORT || 5000;
 
 // Middleware
