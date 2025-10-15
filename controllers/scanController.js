@@ -14,6 +14,7 @@ exports.scanImage = async (req, res) => {
     const outputFileName = 'scanned-' + baseName + '.png';
     const outputPath = path.join('processed', outputFileName);
 
+    // Ensure PNG is fully written before reading for PDF
     await sharp(inputPath)
       .grayscale()
       .normalize()
@@ -21,16 +22,33 @@ exports.scanImage = async (req, res) => {
       .png()
       .toFile(outputPath);
 
+    // Debug: Check PNG file size and existence
+    let pngStats;
+    try {
+      pngStats = fs.statSync(outputPath);
+      console.log('PNG file size:', pngStats.size);
+    } catch (err) {
+      console.error('PNG file not found:', outputPath, err);
+    }
+
     if (req.body && req.body.format === 'pdf') {
-      const pdfDoc = await PDFDocument.create();
-      const imgBytes = fs.readFileSync(outputPath);
-      const img = await pdfDoc.embedPng(imgBytes);
-      const page = pdfDoc.addPage([img.width, img.height]);
-      page.drawImage(img, { x: 0, y: 0, width: img.width, height: img.height });
-      const pdfBytes = await pdfDoc.save();
-      res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', 'attachment; filename=scanned.pdf');
-      return res.send(Buffer.from(pdfBytes));
+      try {
+        const imgBytes = fs.readFileSync(outputPath);
+        console.log('Read PNG bytes:', imgBytes.length);
+        const pdfDoc = await PDFDocument.create();
+        const img = await pdfDoc.embedPng(imgBytes);
+        console.log('Embedded PNG into PDF:', img.width, img.height);
+        const page = pdfDoc.addPage([img.width, img.height]);
+        page.drawImage(img, { x: 0, y: 0, width: img.width, height: img.height });
+        const pdfBytes = await pdfDoc.save();
+        console.log('PDF bytes length:', pdfBytes.length);
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', 'attachment; filename=scanned.pdf');
+        return res.send(Buffer.from(pdfBytes));
+      } catch (err) {
+        console.error('PDF generation error:', err);
+        return res.status(500).json({ error: 'PDF generation failed' });
+      }
     }
 
     return res.sendFile(path.resolve(outputPath));
