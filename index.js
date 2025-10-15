@@ -32,6 +32,11 @@ app.use('/merge', mergeRoutes);
 const convertRoutes = require('./routes/convert');
 app.use('/convert', convertRoutes);
 
+app.get("/health", (req, res) => {
+  res.status(200).send("OK");
+});
+
+
 app.listen(PORT, () => {
   console.log(`ScanX backend running on http://localhost:${PORT}`);
 
