@@ -29,6 +29,8 @@ app.use('/scan', scanRoutes);
 app.use('/compress-image', compressRoutes);
 const mergeRoutes = require('./routes/merge');
 app.use('/merge', mergeRoutes);
+const convertRoutes = require('./routes/convert');
+app.use('/convert', convertRoutes);
 
 app.listen(PORT, () => {
   console.log(`ScanX backend running on http://localhost:${PORT}`);
