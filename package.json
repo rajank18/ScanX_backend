@@ -13,9 +13,13 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "convertapi-js": "^1.0.8",
     "cors": "^2.8.5",
     "docx": "^9.5.1",
+    "docx2pdf-converter": "^2.1.1",
     "express": "^5.1.0",
+    "jspdf": "^4.2.1",
+    "jspdf-autotable": "^5.0.7",
     "mammoth": "^1.11.0",
     "multer": "^2.0.2",
     "nodemon": "^3.1.10",
@@ -23,6 +27,7 @@
     "pdf-lib": "^1.17.1",
     "pdfkit": "^0.17.2",
     "sharp": "^0.34.4",
+    "spire.pdf": "^11.6.0",
     "xlsx": "^0.18.5"
   }
 }
