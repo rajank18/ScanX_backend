@@ -8,14 +8,15 @@ const { execFile } = require('child_process');
 const { promisify } = require('util');
 const { PDFDocument } = require('pdf-lib');
 const pdfParse = require('pdf-parse');
-const docxToPdf = require('docx2pdf-converter');
-const spirePdf = require('spire.pdf');
+const mammoth = require('mammoth');
+const PDFDocumentKit = require('pdfkit');
+
+const execFileAsync = promisify(execFile);
 const XLSX = require('xlsx');
 const { jsPDF } = require('jspdf');
 const autoTableModule = require('jspdf-autotable');
 
 const autoTable = autoTableModule.default || autoTableModule;
-const execFileAsync = promisify(execFile);
 const fsp = fs.promises;
 
 const upload = multer({ dest: path.join(__dirname, '../uploads/') });
@@ -23,7 +24,7 @@ const processedDir = path.join(__dirname, '../processed');
 
 function safeUnlink(filePath) {
   if (!filePath) return;
-  fs.unlink(filePath, () => {});
+  fs.unlink(filePath, () => { });
 }
 
 function scheduleDelete(filePath, delayMs = 60 * 1000) {
@@ -47,8 +48,8 @@ function loadConvertApiNamespace() {
     fetch,
     URL,
     File,
-    FileList: class FileList {},
-    HTMLFormElement: class HTMLFormElement {},
+    FileList: class FileList { },
+    HTMLFormElement: class HTMLFormElement { },
     FormData,
     console,
   };
@@ -157,18 +158,77 @@ router.post('/pdf-to-text', upload.single('file'), async (req, res) => {
   }
 });
 
-router.post('/word-to-pdf', upload.single('file'), async (req, res) => {
+async function convertWordToPdfLocal(filePath) {
+  const textResult = await mammoth.extractRawText({ path: filePath });
+  const text = textResult.value || '';
+
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocumentKit({ size: 'A4', margin: 50 });
+    const chunks = [];
+    doc.on('data', (chunk) => chunks.push(chunk));
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', (err) => reject(err));
+
+    const lines = text.split('\n');
+    if (lines.length === 0 || !text.trim()) {
+      doc.fontSize(12).text('Empty document');
+    } else {
+      lines.forEach((line) => {
+        if (!line.trim()) {
+          doc.moveDown(0.5);
+        } else {
+          doc.fontSize(11).text(line, { align: 'left' });
+        }
+      });
+    }
+    doc.end();
+  });
+}
+
+router.post("/word-to-pdf", upload.single("file"), async (req, res) => {
   if (!req.file) {
-    return res.status(400).send('No Word file uploaded');
+    return res.status(400).send("No Word file uploaded");
   }
 
-  const outputPath = path.join(processedDir, `word-to-pdf-${Date.now()}.pdf`);
+  const outputPath = path.join(
+    processedDir,
+    `word-to-pdf-${Date.now()}.pdf`
+  );
+
   try {
-    await Promise.resolve(docxToPdf.convert(req.file.path, outputPath));
+    const convertApiSecret = process.env.CONVERTAPI_SECRET;
+    if (convertApiSecret) {
+      try {
+        const ConvertApi = loadConvertApiNamespace();
+        const convertApi = ConvertApi.auth({ secret: convertApiSecret });
+        const params = convertApi.createParams();
+        const fileBuffer = await fsp.readFile(req.file.path);
+        const uploadFile = new File([fileBuffer], req.file.originalname || 'input.docx', {
+          type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        });
+        params.add('file', uploadFile);
+        const result = await convertApi.convert('docx', 'pdf', params);
+
+        if (result.files && result.files[0] && result.files[0].Url) {
+          const apiRes = await fetch(result.files[0].Url);
+          if (apiRes.ok) {
+            const pdfBuf = Buffer.from(await apiRes.arrayBuffer());
+            await fsp.writeFile(outputPath, pdfBuf);
+            return sendFileAndCleanup(res, outputPath, [req.file.path]);
+          }
+        }
+      } catch (cloudErr) {
+        console.warn("ConvertAPI failed, falling back to local converter:", cloudErr.message);
+      }
+    }
+
+    const pdfBuffer = await convertWordToPdfLocal(req.file.path);
+    await fsp.writeFile(outputPath, pdfBuffer);
     return sendFileAndCleanup(res, outputPath, [req.file.path]);
-  } catch (error) {
+  } catch (err) {
+    console.error("Word to PDF error:", err);
     safeUnlink(req.file.path);
-    return res.status(500).send('Failed to convert Word to PDF (docx2pdf-converter requires local office tools)');
+    return res.status(500).send("Failed to convert Word to PDF");
   }
 });
 
@@ -262,9 +322,6 @@ router.post('/pdf-to-excel', upload.single('file'), async (req, res) => {
   const outputPath = path.join(processedDir, `pdf-to-excel-${Date.now()}.xlsx`);
 
   try {
-    // Keep spire.pdf in this conversion path per requested stack.
-    const _spireLoaded = !!spirePdf;
-
     const spireSucceeded = await trySpirePdfToExcel(req.file.path, outputPath);
     if (!spireSucceeded) {
       const buffer = await fsp.readFile(req.file.path);
