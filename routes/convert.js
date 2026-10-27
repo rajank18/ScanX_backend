@@ -10,6 +10,8 @@ const { PDFDocument } = require('pdf-lib');
 const pdfParse = require('pdf-parse');
 const mammoth = require('mammoth');
 const PDFDocumentKit = require('pdfkit');
+const sharp = require('sharp');
+const { Document, Packer, Paragraph, TextRun } = require('docx');
 
 const execFileAsync = promisify(execFile);
 const XLSX = require('xlsx');
@@ -28,7 +30,8 @@ function safeUnlink(filePath) {
 }
 
 function scheduleDelete(filePath, delayMs = 60 * 1000) {
-  setTimeout(() => safeUnlink(filePath), delayMs);
+  const timer = setTimeout(() => safeUnlink(filePath), delayMs);
+  if (timer.unref) timer.unref();
 }
 
 function sendFileAndCleanup(res, outputPath, tempFiles = []) {
@@ -100,9 +103,16 @@ router.post('/image-to-pdf', upload.array('images'), async (req, res) => {
     for (const file of uploadedFiles) {
       const bytes = await fsp.readFile(file.path);
       const isPng = file.mimetype === 'image/png' || file.originalname.toLowerCase().endsWith('.png');
-      const image = isPng
-        ? await pdfDoc.embedPng(bytes)
-        : await pdfDoc.embedJpg(bytes);
+      let image;
+      try {
+        image = isPng
+          ? await pdfDoc.embedPng(bytes)
+          : await pdfDoc.embedJpg(bytes);
+      } catch (embedErr) {
+        // Fallback: convert any image format (WebP, AVIF, TIFF, BMP, GIF) to standard PNG bytes
+        const safePngBytes = await sharp(bytes).png().toBuffer();
+        image = await pdfDoc.embedPng(safePngBytes);
+      }
 
       const page = pdfDoc.addPage([image.width, image.height]);
       page.drawImage(image, { x: 0, y: 0, width: image.width, height: image.height });
@@ -232,45 +242,81 @@ router.post("/word-to-pdf", upload.single("file"), async (req, res) => {
   }
 });
 
+async function convertPdfToWordLocal(filePath) {
+  const buffer = await fsp.readFile(filePath);
+  const parsed = await pdfParse(buffer);
+  const lines = (parsed.text || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const doc = new Document({
+    sections: [
+      {
+        properties: {},
+        children:
+          lines.length > 0
+            ? lines.map(
+                (line) =>
+                  new Paragraph({
+                    children: [new TextRun({ text: line, size: 24 })],
+                  })
+              )
+            : [
+                new Paragraph({
+                  children: [new TextRun({ text: 'Empty Document', size: 24 })],
+                }),
+              ],
+      },
+    ],
+  });
+
+  return await Packer.toBuffer(doc);
+}
+
 router.post('/pdf-to-word', upload.single('file'), async (req, res) => {
   if (!req.file) {
     return res.status(400).send('No PDF uploaded');
   }
 
+  const outputPath = path.join(processedDir, `pdf-to-word-${Date.now()}.docx`);
   const convertApiSecret = process.env.CONVERTAPI_SECRET;
-  if (!convertApiSecret) {
-    safeUnlink(req.file.path);
-    return res.status(500).send('Missing CONVERTAPI_SECRET environment variable');
+
+  if (convertApiSecret) {
+    try {
+      const ConvertApi = loadConvertApiNamespace();
+      const convertApi = ConvertApi.auth({ secret: convertApiSecret });
+      const params = convertApi.createParams();
+      const fileBuffer = await fsp.readFile(req.file.path);
+      const uploadFile = new File([fileBuffer], req.file.originalname || 'input.pdf', {
+        type: 'application/pdf',
+      });
+
+      params.add('file', uploadFile);
+      const result = await convertApi.convert('pdf', 'docx', params);
+
+      if (result.files && result.files[0] && result.files[0].Url) {
+        const response = await fetch(result.files[0].Url);
+        if (response.ok) {
+          const docxBuffer = Buffer.from(await response.arrayBuffer());
+          await fsp.writeFile(outputPath, docxBuffer);
+          return sendFileAndCleanup(res, outputPath, [req.file.path]);
+        }
+      }
+    } catch (cloudErr) {
+      console.warn('ConvertAPI failed, falling back to local docx generator:', cloudErr.message);
+    }
   }
 
+  // Resilient offline fallback: extracts PDF text and generates DOCX locally
   try {
-    const ConvertApi = loadConvertApiNamespace();
-    const convertApi = ConvertApi.auth({ secret: convertApiSecret });
-    const params = convertApi.createParams();
-    const fileBuffer = await fsp.readFile(req.file.path);
-    const uploadFile = new File([fileBuffer], req.file.originalname || 'input.pdf', {
-      type: 'application/pdf',
-    });
-
-    params.add('file', uploadFile);
-    const result = await convertApi.convert('pdf', 'docx', params);
-
-    if (!result.files || !result.files[0] || !result.files[0].Url) {
-      throw new Error('No DOCX file returned by ConvertAPI');
-    }
-
-    const response = await fetch(result.files[0].Url);
-    if (!response.ok) {
-      throw new Error('Failed to download converted DOCX');
-    }
-
-    const docxBuffer = Buffer.from(await response.arrayBuffer());
-    const outputPath = path.join(processedDir, `pdf-to-word-${Date.now()}.docx`);
+    const docxBuffer = await convertPdfToWordLocal(req.file.path);
     await fsp.writeFile(outputPath, docxBuffer);
     return sendFileAndCleanup(res, outputPath, [req.file.path]);
   } catch (error) {
+    console.error('Local PDF to Word conversion failed:', error);
     safeUnlink(req.file.path);
-    return res.status(500).send('Failed to convert PDF to Word via convertapi-js');
+    return res.status(500).send('Failed to convert PDF to Word');
   }
 });
 
@@ -285,6 +331,7 @@ router.post('/excel-to-pdf', upload.single('file'), async (req, res) => {
     const workbook = XLSX.readFile(req.file.path, { cellDates: true });
     const firstSheetName = workbook.SheetNames[0];
     if (!firstSheetName) {
+      safeUnlink(req.file.path);
       return res.status(400).send('Excel file has no sheets');
     }
 
@@ -297,13 +344,18 @@ router.post('/excel-to-pdf', upload.single('file'), async (req, res) => {
     doc.setFontSize(14);
     doc.text(`Sheet: ${firstSheetName}`, 40, 40);
 
-    autoTable(doc, {
-      head: [headerRow.map((value) => String(value ?? ''))],
-      body: bodyRows.map((row) => row.map((value) => String(value ?? ''))),
-      startY: 60,
-      styles: { fontSize: 8, cellPadding: 4 },
-      headStyles: { fillColor: [33, 150, 243] },
-    });
+    if (rows.length === 0 || (headerRow.length === 0 && bodyRows.length === 0)) {
+      doc.setFontSize(10);
+      doc.text('This sheet contains no tabular data.', 40, 70);
+    } else {
+      autoTable(doc, {
+        head: headerRow.length > 0 ? [headerRow.map((value) => String(value ?? ''))] : undefined,
+        body: bodyRows.map((row) => (Array.isArray(row) ? row.map((value) => String(value ?? '')) : [String(row ?? '')])),
+        startY: 60,
+        styles: { fontSize: 8, cellPadding: 4 },
+        headStyles: { fillColor: [33, 150, 243] },
+      });
+    }
 
     const pdfBytes = Buffer.from(doc.output('arraybuffer'));
     await fsp.writeFile(outputPath, pdfBytes);

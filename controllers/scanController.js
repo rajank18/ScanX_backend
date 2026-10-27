@@ -130,7 +130,10 @@ exports.compressImage = async (req, res) => {
     if (!bestBuffer || bestBuffer.length > targetSizeBytes) {
       const metadata = await sharp(inputPath).metadata();
       const currentBuffer = bestBuffer || (await sharp(inputPath).jpeg({ quality: 20 }).toBuffer());
-      const scale = Math.sqrt(targetSizeBytes / currentBuffer.length) * 0.95;
+      const rawScale = currentBuffer && currentBuffer.length > 0
+        ? Math.sqrt(targetSizeBytes / currentBuffer.length) * 0.95
+        : 1;
+      const scale = Number.isFinite(rawScale) && rawScale > 0 ? rawScale : 1;
 
       const newWidth = Math.max(Math.floor((metadata.width || 800) * scale), 150);
 
@@ -147,5 +150,32 @@ exports.compressImage = async (req, res) => {
     console.error('Compression error:', error);
     cleanupFiles([inputPath]);
     res.status(500).json({ error: 'Compression failed' });
+  }
+};
+
+exports.compressPdf = async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'No PDF file uploaded' });
+  }
+
+  const inputPath = req.file.path;
+  try {
+    const fileBytes = fs.readFileSync(inputPath);
+    const pdfDoc = await PDFDocument.load(fileBytes, { ignoreEncryption: true });
+
+    const compressedBytes = await pdfDoc.save({
+      useObjectStreams: true,
+      addDefaultPage: false,
+    });
+
+    cleanupFiles([inputPath]);
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'attachment; filename=compressed.pdf');
+    return res.send(Buffer.from(compressedBytes));
+  } catch (error) {
+    console.error('PDF compression error:', error);
+    cleanupFiles([inputPath]);
+    return res.status(500).json({ error: 'Failed to compress PDF' });
   }
 };

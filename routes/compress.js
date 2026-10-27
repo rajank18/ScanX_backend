@@ -1,6 +1,6 @@
 const express = require('express');
 const multer = require('multer');
-const { compressImage } = require('../controllers/scanController');
+const { compressImage, compressPdf } = require('../controllers/scanController');
 const router = express.Router();
 
 // Configure multer storage
@@ -15,5 +15,6 @@ const storage = multer.diskStorage({
 const upload = multer({ storage });
 
 router.post('/', upload.single('image'), compressImage);
+router.post('/pdf', upload.single('file'), compressPdf);
 
 module.exports = router;
