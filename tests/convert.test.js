@@ -130,4 +130,34 @@ describe('Conversion APIs (POST /convert/*)', () => {
       assert.ok(res.text.includes('client-side'));
     });
   });
+
+  describe('Colab / Notebook to PDF (POST /convert/colab-to-pdf)', () => {
+    const SAMPLE_IPYNB = path.join(FIXTURES_DIR, 'sample.ipynb');
+
+    test('returns 400 when neither URL nor file is provided', async () => {
+      const res = await request(app).post('/convert/colab-to-pdf').send({});
+      assert.equal(res.status, 400);
+      assert.ok(res.body.error);
+    });
+
+    test('successfully converts uploaded .ipynb file into PDF', async () => {
+      const res = await request(app)
+        .post('/convert/colab-to-pdf')
+        .attach('file', SAMPLE_IPYNB);
+
+      assert.equal(res.status, 200);
+      assert.ok(res.headers['content-type'].includes('application/pdf'));
+      assert.ok(res.body.length > 500);
+      assert.equal(res.body.toString('utf8', 0, 5), '%PDF-');
+    });
+
+    test('returns 400 for invalid or malformed URL', async () => {
+      const res = await request(app)
+        .post('/convert/colab-to-pdf')
+        .send({ url: 'https://invalid-non-existent-domain-12345.xyz/notebook.ipynb' });
+
+      assert.equal(res.status, 400);
+      assert.ok(res.body.error);
+    });
+  });
 });

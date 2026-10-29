@@ -396,4 +396,43 @@ router.post('/pdf-to-excel', upload.single('file'), async (req, res) => {
   }
 });
 
+const { fetchNotebookContent, convertNotebookToPdfBuffer } = require('../services/notebookPdfService');
+
+router.post('/colab-to-pdf', upload.single('file'), async (req, res) => {
+  let content = '';
+  let filename = 'notebook.ipynb';
+  const tempFilesToClean = [];
+
+  try {
+    if (req.file) {
+      tempFilesToClean.push(req.file.path);
+      content = await fsp.readFile(req.file.path, 'utf8');
+      filename = req.file.originalname || filename;
+    } else {
+      const url = req.body?.url;
+      if (!url || typeof url !== 'string' || !url.trim()) {
+        return res.status(400).json({ error: 'Please provide a Google Colab / GitHub URL or upload a notebook file.' });
+      }
+      content = await fetchNotebookContent(url.trim());
+      const urlClean = url.split('?')[0];
+      const basename = path.basename(urlClean);
+      if (basename && (basename.endsWith('.ipynb') || basename.endsWith('.py'))) {
+        filename = basename;
+      }
+    }
+
+    const pdfBuffer = await convertNotebookToPdfBuffer(content, { filename });
+    const outputFilename = `${path.parse(filename).name || 'notebook'}.pdf`;
+
+    tempFilesToClean.forEach((p) => safeUnlink(p));
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${outputFilename}"`);
+    return res.send(pdfBuffer);
+  } catch (error) {
+    tempFilesToClean.forEach((p) => safeUnlink(p));
+    return res.status(400).json({ error: error.message || 'Failed to convert notebook to PDF' });
+  }
+});
+
 module.exports = router;
