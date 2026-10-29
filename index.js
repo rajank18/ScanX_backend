@@ -10,8 +10,12 @@ const fsSync = require('fs');
 // Ensure uploads and processed folders exist
 ['uploads', 'processed'].forEach(dir => {
   if (!fsSync.existsSync(dir)) {
-    fsSync.mkdirSync(dir);
-    console.log(`Created missing folder: ${dir}`);
+    try {
+      fsSync.mkdirSync(dir, { recursive: true });
+      console.log(`Created missing folder: ${dir}`);
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+    }
   }
 });
 const PORT = process.env.PORT || 5000;
@@ -26,6 +30,7 @@ app.use('/processed', express.static(path.join(__dirname, 'processed')));
 
 // Routes
 app.use('/scan', scanRoutes);
+app.use('/compress', compressRoutes);
 app.use('/compress-image', compressRoutes);
 const { compressPdf } = require('./controllers/scanController');
 const multer = require('multer');
