@@ -8,7 +8,7 @@ const app = express();
 const fsSync = require('fs');
 
 // Ensure uploads and processed folders exist
-['uploads', 'processed'].forEach(dir => {
+['uploads', 'uploads/share', 'processed'].forEach(dir => {
   if (!fsSync.existsSync(dir)) {
     try {
       fsSync.mkdirSync(dir, { recursive: true });
@@ -40,6 +40,12 @@ const mergeRoutes = require('./routes/merge');
 app.use('/merge', mergeRoutes);
 const convertRoutes = require('./routes/convert');
 app.use('/convert', convertRoutes);
+const redactRoutes = require('./routes/redact');
+app.use('/redact', redactRoutes);
+const shareRoutes = require('./routes/share');
+app.use('/share', shareRoutes);
+const metadataRoutes = require('./routes/metadata');
+app.use('/metadata', metadataRoutes);
 
 app.get("/health", (req, res) => {
   res.status(200).send("OK");
