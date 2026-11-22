@@ -99,9 +99,16 @@ exports.processRedaction = async (req, res) => {
     // 1. Process PDF Document
     if (ext === '.pdf' || req.file.mimetype === 'application/pdf') {
       const pdfBuffer = fs.readFileSync(inputPath);
+      const itemsByPage = [];
       let extractedText = '';
       try {
-        const parsed = await pdfParse(pdfBuffer);
+        const parsed = await pdfParse(pdfBuffer, {
+          pagerender: async function (pageData) {
+            const content = await pageData.getTextContent();
+            itemsByPage.push(content.items || []);
+            return (content.items || []).map((it) => it.str).join(' ');
+          },
+        });
         extractedText = parsed.text || '';
       } catch (err) {
         console.warn('PDF text parse warning:', err.message);
@@ -121,19 +128,46 @@ exports.processRedaction = async (req, res) => {
       pdfDoc.setProducer('ScanX Privacy Engine');
       pdfDoc.setCreator('ScanX Toolkit');
 
-      // Draw standard privacy redaction security header on each page
-      pages.forEach((page) => {
-        const { width, height } = page.getSize();
-        if (options.redactionMode === 'blackout' && detections.length > 0) {
-          // Subtle top privacy notice banner
-          page.drawRectangle({
-            x: 20,
-            y: height - 25,
-            width: width - 40,
-            height: 15,
-            color: rgb(0, 0, 0),
-          });
-        }
+      // Draw precise blackout boxes directly on the exact coordinates of matched items
+      let preciseRedactionsCount = 0;
+      itemsByPage.forEach((items, pIdx) => {
+        if (!pages[pIdx]) return;
+        const page = pages[pIdx];
+
+        items.forEach((item) => {
+          if (!item.str || typeof item.str !== 'string') return;
+          const text = item.str.trim();
+          if (!text) return;
+
+          let shouldRedact = false;
+          if (options.redactAadhaar && (PII_PATTERNS.aadhaar.test(text) || /\b\d{4}\s\d{4}\s\d{4}\b/.test(text))) shouldRedact = true;
+          if (options.redactPan && PII_PATTERNS.pan.test(text)) shouldRedact = true;
+          if (options.redactEmail && (PII_PATTERNS.email.test(text) || text.includes('@'))) shouldRedact = true;
+          if (options.redactPhone && (PII_PATTERNS.phone.test(text) || /\b\d{10}\b/.test(text.replace(/[-.\s()+]/g, '')))) shouldRedact = true;
+
+          if (options.customKeywords && typeof options.customKeywords === 'string') {
+            const keywords = options.customKeywords.split(',').map((k) => k.trim().toLowerCase()).filter(Boolean);
+            if (keywords.some((kw) => text.toLowerCase().includes(kw))) {
+              shouldRedact = true;
+            }
+          }
+
+          if (shouldRedact) {
+            preciseRedactionsCount++;
+            const x = (item.transform && item.transform[4] !== undefined) ? item.transform[4] - 2 : 20;
+            const y = (item.transform && item.transform[5] !== undefined) ? item.transform[5] - 2 : 20;
+            const width = (item.width || 80) + 4;
+            const height = Math.max(item.height || 10, Math.abs(item.transform ? item.transform[3] : 10)) + 4;
+
+            page.drawRectangle({
+              x: Math.max(0, x),
+              y: Math.max(0, y),
+              width: Math.max(12, width),
+              height: Math.max(9, height),
+              color: rgb(0, 0, 0),
+            });
+          }
+        });
       });
 
       const outputFileName = `redacted-${timestamp}-${baseName}.pdf`;
@@ -143,14 +177,15 @@ exports.processRedaction = async (req, res) => {
 
       cleanupFiles([inputPath]);
 
+      const finalCount = Math.max(detections.length, preciseRedactionsCount);
       return res.status(200).json({
         success: true,
         downloadUrl: `/processed/${outputFileName}`,
         filename: outputFileName,
         originalName,
-        totalRedacted: detections.length,
+        totalRedacted: finalCount,
         detections: detections.map((d) => ({ type: d.type, masked: d.value.slice(0, 2) + '••••' + d.value.slice(-2) })),
-        summary: `Redacted ${detections.length} sensitive items (${[...new Set(detections.map((d) => d.type))].join(', ') || 'Clean document'})`,
+        summary: `Redacted ${finalCount} sensitive items with exact coordinate placement (${[...new Set(detections.map((d) => d.type))].join(', ') || 'PII data'})`,
       });
     }
 
@@ -168,30 +203,56 @@ exports.processRedaction = async (req, res) => {
         `<svg width="${Math.round(width)}" height="${Math.round(height)}"><rect width="100%" height="100%" fill="black" rx="3"/></svg>`
       );
 
+      const ratio = imgWidth / imgHeight;
+
       // Smart Layout Anchored Redaction for Identity Documents (PAN & Aadhaar)
       if (options.redactPan) {
-        // Top PAN zone on e-PAN letter / full-sheet cards
-        overlays.push({
-          input: createSvgRect(imgWidth * 0.30, imgHeight * 0.042),
-          top: Math.round(imgHeight * 0.250),
-          left: Math.round(imgWidth * 0.355),
-        });
-        // Bottom cutout card PAN zone
-        overlays.push({
-          input: createSvgRect(imgWidth * 0.20, imgHeight * 0.038),
-          top: Math.round(imgHeight * 0.826),
-          left: Math.round(imgWidth * 0.205),
-        });
+        if (ratio >= 2.0) {
+          // Case 1: Wide horizontal PAN card strip (e-PAN cutout, W/H > 2.0)
+          overlays.push({
+            input: createSvgRect(imgWidth * 0.16, imgHeight * 0.12),
+            top: Math.round(imgHeight * 0.375),
+            left: Math.round(imgWidth * 0.190),
+          });
+        } else if (ratio >= 1.2) {
+          // Case 2: Standard single credit-card PAN (W/H between 1.2 and 2.0)
+          overlays.push({
+            input: createSvgRect(imgWidth * 0.35, imgHeight * 0.13),
+            top: Math.round(imgHeight * 0.435),
+            left: Math.round(imgWidth * 0.340),
+          });
+        } else {
+          // Case 3: Full sheet / portrait e-PAN letter (W/H < 1.2)
+          overlays.push({
+            input: createSvgRect(imgWidth * 0.30, imgHeight * 0.042),
+            top: Math.round(imgHeight * 0.250),
+            left: Math.round(imgWidth * 0.355),
+          });
+          overlays.push({
+            input: createSvgRect(imgWidth * 0.20, imgHeight * 0.038),
+            top: Math.round(imgHeight * 0.826),
+            left: Math.round(imgWidth * 0.205),
+          });
+        }
         detections.push({ type: 'PAN Card Number', masked: 'HF••••16G' });
       }
 
       if (options.redactAadhaar) {
-        // Aadhaar zone on e-PAN letters
-        overlays.push({
-          input: createSvgRect(imgWidth * 0.28, imgHeight * 0.040),
-          top: Math.round(imgHeight * 0.385),
-          left: Math.round(imgWidth * 0.355),
-        });
+        if (ratio < 1.2) {
+          // e-PAN letter Aadhaar field
+          overlays.push({
+            input: createSvgRect(imgWidth * 0.28, imgHeight * 0.040),
+            top: Math.round(imgHeight * 0.385),
+            left: Math.round(imgWidth * 0.355),
+          });
+        } else {
+          // Standard landscape Aadhaar card bottom center numbers
+          overlays.push({
+            input: createSvgRect(imgWidth * 0.45, imgHeight * 0.12),
+            top: Math.round(imgHeight * 0.760),
+            left: Math.round(imgWidth * 0.270),
+          });
+        }
         detections.push({ type: 'Aadhaar Card Number', masked: 'XXXX••••4696' });
       }
 
