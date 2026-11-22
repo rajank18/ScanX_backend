@@ -26,7 +26,12 @@ app.use(express.json());
 
 // Serve static files
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
-app.use('/processed', express.static(path.join(__dirname, 'processed')));
+app.use('/processed', express.static(path.join(__dirname, 'processed'), {
+  setHeaders: (res, filePath) => {
+    const filename = path.basename(filePath);
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  }
+}));
 
 // Routes
 app.use('/scan', scanRoutes);
